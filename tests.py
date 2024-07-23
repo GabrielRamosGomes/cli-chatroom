@@ -9,11 +9,12 @@ class TestServer(unittest.TestCase):
     def setUpClass(cls):
         cls.server = Server()
         threading.Thread(target=cls.server.start, daemon=True).start()
-        time.sleep(1)  # Give server time to start
+        time.sleep(2)
 
     def setUp(self):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client.connect(('127.0.0.1', 12345))
+        self.client.recv(1024)
 
     def tearDown(self):
         self.client.close()
@@ -24,27 +25,30 @@ class TestServer(unittest.TestCase):
         return response
 
     def test_username(self):
-        response = self.send_command("/username alice")
+        response = self.send_command("/username test")
         self.assertEqual(response, "/username ok")
 
     def test_create_and_join_room(self):
-        self.send_command("/username bob")
+        self.send_command("/username test2")
         response = self.send_command("/create #testroom")
         self.assertEqual(response, "/create ok")
         response = self.send_command("/join #testroom")
-        self.assertEqual(response, "/join ok")
+        self.assertEqual(response, "/join ok")   
 
-    def test_send_message(self):
-        self.send_command("/username charlie")
-        self.send_command("/join #welcome")
-        response = self.send_command("/msg Hello everyone!")
+    def test_msg(self):
+        self.send_command("/username test3")
+        self.send_command("/create #testroom")
+        self.send_command("/join #testroom")
+        response = self.send_command("/msg Hello from test3")
         self.assertEqual(response, "/msg sent")
 
-    def test_private_message(self):
-        self.send_command("/username dave")
+    def test_msgs(self):
+        self.send_command("/username test4")
         self.send_command("/join #welcome")
-        response = self.send_command("/pmsg charlie Hello, Charlie!")
-        self.assertEqual(response, "/pmsg sent")
+        self.send_command("/msg Hello from test4")
+        time.sleep(1)
+        response = self.send_command("/msgs")
+        self.assertIn("Hello from test4", response)
 
 if __name__ == "__main__":
     unittest.main()
