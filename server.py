@@ -32,7 +32,7 @@ class Server:
         print("Server started...")
         while True:
             conn, addr = self.server.accept()
-            threading.Thread(target=self.handle_client, args=(conn,)).start()
+            threading.Thread(target=self.handle_client, args=(conn,), daemon=True).start()
 
     def handle_client(self, conn):
         conn.sendall(b"/username required\n")
@@ -43,21 +43,27 @@ class Server:
                 if not msg:
                     continue
 
-                command, *args = msg.split()
+                command, *args = msg.split(' ', 1)
+                args = args[0] if args else ""
+                
                 if command in self.commands:
                     response = self.commands[command](args, username, conn)
                 else:
                     response = "/unknown command"
 
                 if command == '/username' and response == '/username ok':
-                    username = args[0]
-                    self.clients[username] = conn
-                    self.rooms['#welcome'].append(username)
+                    with self.lock:
+                        username = args
+                        self.clients[username] = conn
+                        self.rooms['#welcome'].append(username)
 
                 if command == '/exit':
                     if username:
-                        self.rooms[self.get_user_room(username)].remove(username)
-                        del self.clients[username]
+                        with self.lock:
+                            current_room = self.get_user_room(username)
+                            if current_room:
+                                self.rooms[current_room].remove(username)
+                            del self.clients[username]
                     conn.sendall(response.encode() + b'\n')
                     conn.close()
                     break
@@ -65,11 +71,15 @@ class Server:
                 conn.sendall(response.encode() + b'\n')
             except ConnectionResetError:
                 break
+            except Exception as e:
+                print(f"Error: {e}")
+                break
+        conn.close()
 
     def handle_username(self, args, username, conn):
         if not args:
             return "/username required"
-        if args[0] in self.clients:
+        if args in self.clients:
             return "/username taken"
         return "/username ok"
 
@@ -77,7 +87,8 @@ class Server:
         return "/exit ok"
 
     def handle_room(self, args, username, conn):
-        return f"/room {self.get_user_room(username)}"
+        room = self.get_user_room(username)
+        return f"/room {room}" if room else "/room none"
 
     def handle_rooms(self, args, username, conn):
         return f"/rooms {', '.join(self.rooms.keys())}"
@@ -85,57 +96,72 @@ class Server:
     def handle_create(self, args, username, conn):
         if not args:
             return "/create room_required"
-        if args[0] in self.rooms:
+        if args in self.rooms:
             return "/create room_exists"
-        self.rooms[args[0]] = []
+        with self.lock:
+            self.rooms[args] = []
         return "/create ok"
 
     def handle_join(self, args, username, conn):
-        if not args or args[0] not in self.rooms:
+        if not args or args not in self.rooms:
             return "/join no_room"
-        current_room = self.get_user_room(username)
-        self.rooms[current_room].remove(username)
-        self.rooms[args[0]].append(username)
+        with self.lock:
+            current_room = self.get_user_room(username)
+            if current_room:
+                self.rooms[current_room].remove(username)
+            self.rooms[args].append(username)
         return "/join ok"
 
     def handle_users(self, args, username, conn):
-        return f"/users {', '.join(self.rooms[self.get_user_room(username)])}"
+        room = self.get_user_room(username)
+        return f"/users {', '.join(self.rooms.get(room, []))}" if room else "/users none"
 
     def handle_allusers(self, args, username, conn):
-        all_users = [f"{user}@{room}" for room, users in self.rooms.items() for user in users]
+        with self.lock:
+            all_users = [f"{user}@{room}" for room, users in self.rooms.items() for user in users]
         return f"/allusers {', '.join(all_users)}"
 
     def handle_msg(self, args, username, conn):
-        current_room = self.get_user_room(username)
-        message = f"({username} @{current_room}) {' '.join(args)}"
-        self.messages[current_room].append(message)
-        for user in self.rooms[current_room]:
-            if user != username:
-                self.clients[user].sendall((message + '\n').encode())
-        return "/msg sent"
+        room = self.get_user_room(username)
+        if room:
+            message = f"({username} @{room}) {args}"
+            with self.lock:
+                self.messages[room].append(message)
+                for user in self.rooms[room]:
+                    if user != username:
+                        self.clients[user].sendall((message + '\n').encode())
+            return "/msg sent"
+        return "/msg failed"
 
     def handle_msgs(self, args, username, conn):
-        current_room = self.get_user_room(username)
-        if not self.messages[current_room]:
-            return "/msgs none"
-        messages = "\n".join(self.messages[current_room])
-        self.messages[current_room].clear()
-        return f"/msgs\n{messages}"
+        room = self.get_user_room(username)
+        if room:
+            with self.lock:
+                if not self.messages[room]:
+                    return "/msgs none"
+                messages = "\n".join(self.messages[room])
+                self.messages[room].clear()
+            return f"/msgs\n{messages}"
+        return "/msgs none"
 
     def handle_pmsg(self, args, username, conn):
-        if len(args) < 2 or args[0] not in self.clients:
+        if len(args.split(' ', 1)) < 2:
+            return "/pmsg usage"
+        recipient, private_msg = args.split(' ', 1)
+        if recipient not in self.clients:
             return "/pmsg no_user"
-        recipient, private_msg = args[0], ' '.join(args[1:])
         message = f"({username} @private) {private_msg}"
-        self.private_messages[recipient].append(message)
+        with self.lock:
+            self.private_messages[recipient].append(message)
         self.clients[recipient].sendall((message + '\n').encode())
         return "/pmsg sent"
 
     def handle_pmsgs(self, args, username, conn):
-        if not self.private_messages[username]:
-            return "/pmsgs none"
-        messages = "\n".join(self.private_messages[username])
-        self.private_messages[username].clear()
+        with self.lock:
+            if not self.private_messages[username]:
+                return "/pmsgs none"
+            messages = "\n".join(self.private_messages[username])
+            self.private_messages[username].clear()
         return f"/pmsgs\n{messages}"
 
     def handle_help(self, args, username, conn):
