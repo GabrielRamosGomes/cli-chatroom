@@ -36,18 +36,26 @@ class TestServer(unittest.TestCase):
     def test_username(self):
         response = self.send_command("/username test")
         self.assertEqual(response, "/username ok")
+        self.send_command("/exit")
+
+    def test_malformed_command(self):
+        response = self.send_command("/msg")
+        self.assertEqual(response, "/msg failed")
+        self.send_command("/exit")
 
     def test_username_taken(self):
         self.send_command("/username user1")
         response = self.send_command("/username user1")
         self.assertEqual(response, "/username taken")
+        self.send_command("/exit")
 
     def test_create_and_join_room(self):
         self.send_command("/username test2")
         response = self.send_command("/create #testroom")
         self.assertEqual(response, "/create ok")
         response = self.send_command("/join #testroom")
-        self.assertEqual(response, "/join ok")   
+        self.assertEqual(response, "/join ok")
+        self.send_command("/exit")
 
     def test_msg(self):
         self.send_command("/username test3")
@@ -55,6 +63,7 @@ class TestServer(unittest.TestCase):
         self.send_command("/join #testroom")
         response = self.send_command("/msg Hello from test3")
         self.assertEqual(response, "/msg sent")
+        self.send_command("/exit")
 
     def test_msgs(self):
         self.send_command("/username test4")
@@ -63,6 +72,7 @@ class TestServer(unittest.TestCase):
         time.sleep(1)
         response = self.send_command("/msgs")
         self.assertIn("Hello from test4", response)
+        self.send_command("/exit")
 
     def test_multiple_clients(self):
         # User 1 setup
@@ -102,7 +112,43 @@ class TestServer(unittest.TestCase):
         self.send_command("/exit")
         client2.sendall(b"/exit\n")
         client2.close()
+    	
+    def test_private_messages(self):
+        self.send_command("/username user24")
+        self.send_command("/join #welcome")
 
+        client2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client2.connect(('127.0.0.1', 12345))
+        client2.recv(1024)
+        client2.sendall(b"/username user25\n")
+        client2.recv(1024)
+
+        self.send_command("/pmsg user25 Hello from user24")
+        client2.sendall(b"/pmsg user24 Hello from user25\n")
+
+        # Check private messages for both users
+        response_user24 = self.send_command("/pmsgs")
+        self.assertIn("Hello from user25", response_user24)
+
+        response_user25 = client2.recv(1024).decode().strip()
+        self.assertIn("Hello from user24", response_user25)
+
+        self.send_command("/exit")
+        client2.sendall(b"/exit\n")
+        client2.close()
+
+    def test_join_non_existent_room(self):
+        response = self.send_command("/username user26")
+        response = self.send_command("/join #nonexistentroom")
+        self.assertEqual(response, "/join no_room")
+        self.send_command("/exit")
+
+    def test_create_existing_room(self):
+        response = self.send_command("/username user27")
+       
+        response = self.send_command("/create #welcome")
+        self.assertEqual(response, "/create room_exists")
+        self.send_command("/exit")
 
 
 if __name__ == "__main__":
