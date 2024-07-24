@@ -15,7 +15,7 @@ class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, unique=True, nullable=False)
-    password = Column(String, nullable=False)  # Add password field
+    password = Column(String, nullable=False)
     rooms = relationship('Room', secondary=user_room_table, back_populates='users')
 
     def set_password(self, password):
