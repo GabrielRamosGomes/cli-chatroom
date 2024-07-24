@@ -1,20 +1,21 @@
-# server.py
 import socket
 import threading
 from database import db, User, Room, Message, PrivateMessage
 
 class Server:
+    allowed_logged_out_commands = {'/login', '/register', '/help'}
+    
     def __init__(self, host='127.0.0.1', port=12345):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((host, port))
         self.server.listen(5)
-        self.clients = {}
-        self.sessions = {}
+        self.clients = {}  # Maps usernames to connections
         self.session = db.get_session()
+        self.logged_in_users = {}  # Maps connections to usernames
+        self.user_rooms = {}  # Maps usernames to their current rooms
         self.commands = {
             '/register': self.handle_register,
             '/login': self.handle_login,
-            '/username': self.handle_username,
             '/create': self.handle_create,
             '/join': self.handle_join,
             '/msg': self.handle_msg,
@@ -36,28 +37,50 @@ class Server:
             threading.Thread(target=self.handle_client, args=(conn,)).start()
 
     def handle_client(self, conn):
-        conn.sendall(b'/register or /login required\n')
-        username = None
+        conn.sendall("Welcome to the chat server!\n".encode())
+        conn.sendall("Use /login <username> <password>.\n".encode())
+        conn.sendall("Use /register <username> <password> to create a new account.\n".encode())
+        
         while True:
             try:
                 data = conn.recv(1024).decode().strip()
                 if not data:
                     break
+                
                 command, *args = data.split()
-                if command in self.commands:
+                username = self.logged_in_users.get(conn)
+                
+                if command not in Server.allowed_logged_out_commands and not username:
+                    response = "/login required"
+                elif command in self.commands:
                     response = self.commands[command](args, username, conn)
-                    if command == '/login' and response == '/login ok':
-                        username = args[0]
-                        self.clients[username] = conn
-                    conn.sendall((response + '\n').encode())
                 else:
-                    conn.sendall(b'Unknown command\n')
+                    response = "Invalid command use /help for a list of commands"
+
+                conn.sendall((response + '\n').encode())
+
+                if command == '/login' and response == '/login ok':
+                    self.clients[username] = conn
+                    self.logged_in_users[conn] = username
+                    self.user_rooms[username] = None  # No room initially
+                elif command == '/exit' and username:
+                    if username in self.clients:
+                        del self.clients[username]
+                    if conn in self.logged_in_users:
+                        del self.logged_in_users[conn]
+                    if username in self.user_rooms:
+                        del self.user_rooms[username]
+
             except Exception as e:
                 print(f"Error: {e}")
                 break
 
-        if username in self.clients:
+        # Clean up on disconnect
+        username = self.logged_in_users.pop(conn, None)
+        if username and username in self.clients:
             del self.clients[username]
+        if username in self.user_rooms:
+            del self.user_rooms[username]
         conn.close()
 
     def handle_register(self, args, username, conn):
@@ -67,7 +90,7 @@ class Server:
         if self.session.query(User).filter_by(username=new_username).first():
             return '/register username_taken'
         user = User(username=new_username)
-        user.set_password(password)  # Hash and set the password
+        user.set_password(password)
         self.session.add(user)
         self.session.commit()
         return '/register ok'
@@ -75,32 +98,18 @@ class Server:
     def handle_login(self, args, username, conn):
         if len(args) != 2:
             return '/login invalid'
-        username, password = args
-        user = self.session.query(User).filter_by(username=username).first()
-        if not user or user.password != password:
+        login_username, password = args
+        user = self.session.query(User).filter_by(username=login_username).first()
+        if not user or not user.check_password(password):
             return '/login invalid'
-        if username in self.clients:
+        if login_username in self.clients:
             return '/login already_logged_in'
-        self.clients[username] = conn
-        self.sessions[conn] = username
+        self.clients[login_username] = conn
+        self.logged_in_users[conn] = login_username
+        self.user_rooms[login_username] = None  # No room initially
         return '/login ok'
 
-    def handle_username(self, args, username, conn):
-        if not username:
-            return '/login required'
-        if len(args) != 1:
-            return '/username invalid'
-        new_username = args[0]
-        if self.session.query(User).filter_by(username=new_username).first():
-            return '/username taken'
-        user = User(username=new_username)
-        self.session.add(user)
-        self.session.commit()
-        return '/username ok'
-
     def handle_create(self, args, username, conn):
-        if not username:
-            return '/login required'
         if len(args) != 1 or not args[0].startswith('#'):
             return '/create invalid'
         room_name = args[0]
@@ -112,8 +121,6 @@ class Server:
         return '/create ok'
 
     def handle_join(self, args, username, conn):
-        if not username:
-            return '/login required'
         if len(args) != 1 or not args[0].startswith('#'):
             return '/join invalid'
         room_name = args[0]
@@ -121,13 +128,15 @@ class Server:
         if not room:
             return '/join nonexistent'
         user = self.session.query(User).filter_by(username=username).first()
-        user.rooms.append(room)
-        self.session.commit()
-        return '/join ok'
+        if room not in user.rooms:
+            user.rooms.append(room)
+            self.session.commit()
+            self.user_rooms[username] = room_name
+            return '/join ok'
+        else:
+            return '/join already_member'
 
     def handle_msg(self, args, username, conn):
-        if not username:
-            return '/login required'
         if len(args) < 2 or not args[0].startswith('#'):
             return '/msg invalid'
         room_name = args[0]
@@ -144,8 +153,6 @@ class Server:
         return '/msg sent'
 
     def handle_msgs(self, args, username, conn):
-        if not username:
-            return '/login required'
         if len(args) != 1 or not args[0].startswith('#'):
             return '/msgs invalid'
         room_name = args[0]
@@ -156,8 +163,6 @@ class Server:
         return '\n'.join([f"{msg.username}: {msg.message}" for msg in messages]) if messages else "/msgs none"
 
     def handle_pmsg(self, args, username, conn):
-        if not username:
-            return '/login required'
         if len(args) < 2:
             return '/pmsg invalid'
         to_user = args[0]
@@ -172,15 +177,13 @@ class Server:
         return '/pmsg sent'
 
     def handle_pmsgs(self, args, username, conn):
-        if not username:
-            return '/login required'
         messages = self.session.query(PrivateMessage).filter_by(to_user=username).all()
         return '\n'.join([f"{msg.from_user}: {msg.message}" for msg in messages]) if messages else "/pmsgs none"
 
     def handle_help(self, args, username, conn):
         help_text = (
             "/login <username> <password> - Login with existing credentials\n"
-            "/username <name> - Set your username\n"
+            "/register <username> <password> - Register a new account\n"
             "/create <#room> - Create a new room\n"
             "/join <#room> - Join a room\n"
             "/msg <#room> <message> - Send a message to a room\n"
@@ -196,16 +199,20 @@ class Server:
         return help_text
 
     def handle_exit(self, args, username, conn):
-        if not username:
-            return '/login required'
         if username in self.clients:
             del self.clients[username]
-        if conn in self.sessions:
-            del self.sessions[conn]
+        if conn in self.logged_in_users:
+            del self.logged_in_users[conn]
+        if username in self.user_rooms:
+            del self.user_rooms[username]
         return '/exit ok'
 
     def handle_room(self, args, username, conn):
-        return '/room not implemented'
+        current_room = self.user_rooms.get(username)
+        if current_room:
+            return f"Current room: {current_room}"
+        else:
+            return "/room not_in_room"
 
     def handle_rooms(self, args, username, conn):
         rooms = self.session.query(Room).all()
