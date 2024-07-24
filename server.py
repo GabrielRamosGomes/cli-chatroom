@@ -8,10 +8,11 @@ class Server:
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((host, port))
         self.server.listen(5)
-        self.clients = {}  # Mapping of username to connection
-        self.sessions = {}  # Mapping of connection to username
+        self.clients = {}
+        self.sessions = {}
         self.session = db.get_session()
         self.commands = {
+            '/register': self.handle_register,
             '/login': self.handle_login,
             '/username': self.handle_username,
             '/create': self.handle_create,
@@ -35,7 +36,7 @@ class Server:
             threading.Thread(target=self.handle_client, args=(conn,)).start()
 
     def handle_client(self, conn):
-        conn.sendall(b'/login <username> <password> required\n')
+        conn.sendall(b'/register or /login required\n')
         username = None
         while True:
             try:
@@ -48,24 +49,28 @@ class Server:
                     if command == '/login' and response == '/login ok':
                         username = args[0]
                         self.clients[username] = conn
-                        self.sessions[conn] = username
-                    elif command == '/exit':
-                        if username in self.clients:
-                            del self.clients[username]
-                        if conn in self.sessions:
-                            del self.sessions[conn]
                     conn.sendall((response + '\n').encode())
                 else:
                     conn.sendall(b'Unknown command\n')
-            except:
+            except Exception as e:
+                print(f"Error: {e}")
                 break
 
-        if conn in self.sessions:
-            username = self.sessions[conn]
-            if username in self.clients:
-                del self.clients[username]
-            del self.sessions[conn]
+        if username in self.clients:
+            del self.clients[username]
         conn.close()
+
+    def handle_register(self, args, username, conn):
+        if len(args) != 2:
+            return '/register invalid'
+        new_username, password = args
+        if self.session.query(User).filter_by(username=new_username).first():
+            return '/register username_taken'
+        user = User(username=new_username)
+        user.set_password(password)  # Hash and set the password
+        self.session.add(user)
+        self.session.commit()
+        return '/register ok'
 
     def handle_login(self, args, username, conn):
         if len(args) != 2:
