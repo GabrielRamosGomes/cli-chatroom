@@ -59,12 +59,6 @@ class Server:
                 else:
                     response = "/unknown command"
 
-                if command == '/username' and response == '/username ok':
-                    with self.lock:
-                        username = args
-                        self.clients[username] = conn
-                        self.rooms['#welcome'].append(username)
-
                 if command == '/exit':
                     if username:
                         with self.lock:
@@ -85,7 +79,7 @@ class Server:
         conn.close()
 
     def handle_login(self, args, username, conn):
-        if not args:
+        if len(args.split(' ', 1)) != 2:
             return "/login <username> <password>"
         
         username, password = args.split(' ', 1)
@@ -98,7 +92,7 @@ class Server:
         return "/login ok"
 
     def handle_register(self, args, username, conn):
-        if not args:
+        if len(args.split(' ', 1)) < 2:
             return "/register <username> <password>"
         
         username, password = args.split(' ', 1)
