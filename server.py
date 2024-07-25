@@ -56,7 +56,11 @@ class Server:
 
                 command, *args = msg.split(' ', 1)
                 args = args[0] if args else ""
-                
+
+                if not username and command != '/username':
+                    conn.sendall(b"/username required\n")
+                    continue
+
                 if command in self.commands:
                     response = self.commands[command](args, username, conn)
                 else:
