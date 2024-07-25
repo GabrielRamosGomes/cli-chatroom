@@ -1,12 +1,9 @@
 import socket
 import threading
 from collections import defaultdict, deque
-from database import db, User, Room, Message, PrivateMessage
 
 class Server:
-
     def __init__(self, host='127.0.0.1', port=12345):
-        self.allowed_loggout_commands = ['/exit', '/register', '/login']
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((host, port))
         self.server.listen(5)
@@ -29,8 +26,6 @@ class Server:
             '/pmsg': self.handle_pmsg,
             '/pmsgs': self.handle_pmsgs,
             '/help': self.handle_help,
-            '/register': self.handle_register,
-            '/login': self.handle_login,
         }
 
     def start(self):
@@ -40,7 +35,7 @@ class Server:
             threading.Thread(target=self.handle_client, args=(conn,), daemon=True).start()
 
     def handle_client(self, conn):
-        conn.sendall(b"/login <username> <password> | /register <username> <password> \n")
+        conn.sendall(b"/username required\n")
         username = None
         while True:
             try:
@@ -51,13 +46,16 @@ class Server:
                 command, *args = msg.split(' ', 1)
                 args = args[0] if args else ""
                 
-                username = self.get_username_from_conn(conn) or username
-                if not username and command not in self.allowed_loggout_commands:
-                    response = "/login required"
-                elif command in self.commands:
+                if command in self.commands:
                     response = self.commands[command](args, username, conn)
                 else:
                     response = "/unknown command"
+
+                if command == '/username' and response == '/username ok':
+                    with self.lock:
+                        username = args
+                        self.clients[username] = conn
+                        self.rooms['#welcome'].append(username)
 
                 if command == '/exit':
                     if username:
@@ -77,36 +75,6 @@ class Server:
                 print(f"Error: {e}")
                 break
         conn.close()
-
-    def handle_login(self, args, username, conn):
-        if len(args.split(' ', 1)) != 2:
-            return "/login <username> <password>"
-        
-        username, password = args.split(' ', 1)
-        user = db.get_session().query(User).filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return "/login failed"
-        
-        self.clients[username] = conn
-        self.rooms['#welcome'].append(username)
-        return "/login ok"
-
-    def handle_register(self, args, username, conn):
-        if len(args.split(' ', 1)) < 2:
-            return "/register <username> <password>"
-        
-        username, password = args.split(' ', 1)
-
-        if db.get_session().query(User).filter_by(username=username).first():
-            return "/register username_taken"
-
-        user = User(username=username)
-        user.set_password(password)
-        with db.get_session() as session:
-            session.add(user)
-            session.commit()
-
-        return "/register ok now login with /login <username> <password>"
 
     def handle_username(self, args, username, conn):
         if not args:
@@ -215,13 +183,6 @@ class Server:
         for room, users in self.rooms.items():
             if username in users:
                 return room
-        return None
-
-    def get_username_from_conn(self, conn):
-        with self.lock:
-            for username, connection in self.clients.items():
-                if connection == conn:
-                    return username
         return None
 
 if __name__ == "__main__":
