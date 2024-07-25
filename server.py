@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from database import Database, User, Room, Message, PrivateMessage, db, user_room_table
 
 class Server:
-    def __init__(self, host='127.0.0.1', port=12345):
+    def __init__(self, host='127.0.0.1', port=12345, session=None):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((host, port))
         self.server.listen(5)
@@ -13,7 +13,7 @@ class Server:
         self.lock = threading.Lock()
         self.messages = defaultdict(deque)
         self.private_messages = defaultdict(deque)
-        self.session = db.get_session()
+        self.session = session if session else db.get_session()
         self.commands = {
             '/username': self.handle_username,
             '/exit': self.handle_exit,
