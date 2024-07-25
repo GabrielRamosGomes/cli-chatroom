@@ -1,17 +1,19 @@
 import socket
 import threading
 from collections import defaultdict, deque
+from database import Database, User, Room, Message, PrivateMessage, db, user_room_table
 
 class Server:
     def __init__(self, host='127.0.0.1', port=12345):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((host, port))
         self.server.listen(5)
-        self.rooms = {'#welcome': []}
+        self.rooms = {}
         self.clients = {}
         self.lock = threading.Lock()
         self.messages = defaultdict(deque)
         self.private_messages = defaultdict(deque)
+        self.session = db.get_session()
         self.commands = {
             '/username': self.handle_username,
             '/exit': self.handle_exit,
@@ -28,7 +30,16 @@ class Server:
             '/help': self.handle_help,
         }
 
+    def create_welcome_room(self):
+        welcome_room = self.session.query(Room).filter_by(room='#welcome').first()
+        if not welcome_room:
+            new_room = Room(room='#welcome')
+            self.session.add(new_room)
+            self.session.commit()
+            self.rooms['#welcome'] = new_room
+
     def start(self):
+        self.create_welcome_room()
         print("Server started...")
         while True:
             conn, addr = self.server.accept()
@@ -55,18 +66,13 @@ class Server:
                     with self.lock:
                         username = args
                         self.clients[username] = conn
-                        self.rooms['#welcome'].append(username)
 
                 if command == '/exit':
                     if username:
-                        with self.lock:
-                            current_room = self.get_user_room(username)
-                            if current_room:
-                                self.rooms[current_room].remove(username)
-                            del self.clients[username]
-                    conn.sendall(response.encode() + b'\n')
-                    conn.close()
-                    break
+                        self.remove_user_from_rooms(username)
+                        conn.sendall(response.encode() + b'\n')
+                        conn.close()
+                        break
 
                 conn.sendall(response.encode() + b'\n')
             except ConnectionResetError:
@@ -79,90 +85,139 @@ class Server:
     def handle_username(self, args, username, conn):
         if not args:
             return "/username required"
-        if args in self.clients:
+        if self.session.query(User).filter_by(username=args).first():
             return "/username taken"
+        
+        new_user = User(username=args)
+        self.session.add(new_user)
+        self.session.commit()
+        self.clients[args] = conn
+
         return "/username ok"
 
     def handle_exit(self, args, username, conn):
         return "/exit ok"
 
     def handle_room(self, args, username, conn):
-        room = self.get_user_room(username)
-        return f"/room {room}" if room else "/room none"
+        user = self.session.query(User).filter_by(username=username).first()
+        if user:  
+            room = self.get_user_room(user)
+            return f"/room {room.room}" if room else "/room none"
+
+        return "/room none"
 
     def handle_rooms(self, args, username, conn):
-        return f"/rooms {', '.join(self.rooms.keys())}"
+        rooms = self.session.query(Room).all()
+        room_names = [room.room for room in rooms]
+        return f"/rooms {', '.join(room_names)}"
 
     def handle_create(self, args, username, conn):
         if not args:
             return "/create room_required"
-        if args in self.rooms:
+        if self.session.query(Room).filter_by(room=args).first():
             return "/create room_exists"
-        with self.lock:
-            self.rooms[args] = []
+       
+        if not args.startswith("#"):
+            return "/create invalid_room, must start with #"
+
+        new_room = Room(room=args)
+        self.session.add(new_room)
+        self.session.commit()
+        
         return "/create ok"
 
     def handle_join(self, args, username, conn):
-        if not args or args not in self.rooms:
+        if not args:
             return "/join no_room"
+        
+        room = self.session.query(Room).filter_by(room=args).first()
+        if not room:
+            return "/join no_room"
+        
         with self.lock:
-            current_room = self.get_user_room(username)
-            if current_room:
-                self.rooms[current_room].remove(username)
-            self.rooms[args].append(username)
+            user = self.session.query(User).filter_by(username=username).first()
+            room.users.append(user)
+            self.session.commit()
+       
         return "/join ok"
 
     def handle_users(self, args, username, conn):
-        room = self.get_user_room(username)
-        return f"/users {', '.join(self.rooms.get(room, []))}" if room else "/users none"
+        user = self.session.query(User).filter_by(username=username).first()
+        room = self.get_user_room(user)
+        if room:
+            users = [user.username for user in room.users]
+            return f"/users {', '.join(users)}"
+        return "/users none"
 
     def handle_allusers(self, args, username, conn):
-        with self.lock:
-            all_users = [f"{user}@{room}" for room, users in self.rooms.items() for user in users]
+        rooms = self.session.query(Room).all()
+        all_users = [f"{user.username}@{room.room}" for room in rooms for user in room.users]
         return f"/allusers {', '.join(all_users)}"
 
     def handle_msg(self, args, username, conn):
-        room = self.get_user_room(username)
+        user = self.session.query(User).filter_by(username=username).first()
+        room = self.get_user_room(user)
+
         if room:
-            message = f"({username} @{room}) {args}"
             with self.lock:
+                message = Message(room_id=room.id, username=username, message=args)
+                self.session.add(message)
+                self.session.commit()
                 self.messages[room].append(message)
-                for user in self.rooms[room]:
-                    if user != username:
-                        self.clients[user].sendall((message + '\n').encode())
+
+                for user in room.users:
+                    if user.username != username:
+                        self.clients[user.username].sendall((f"({username} @{room.room}) {args}" + '\n').encode())
+           
             return "/msg sent"
         return "/msg failed"
 
     def handle_msgs(self, args, username, conn):
-        room = self.get_user_room(username)
+        user = self.session.query(User).filter_by(username=username).first()
+        room = self.get_user_room(user)
         if room:
-            with self.lock:
-                if not self.messages[room]:
-                    return "/msgs none"
-                messages = "\n".join(self.messages[room])
-                self.messages[room].clear()
-            return f"/msgs\n{messages}"
+            messages = self.session.query(Message).filter_by(room_id=room.id).all()
+            
+            if not messages:
+                return "/msgs none"
+            
+            message_texts = "\n".join(f"({msg.username} @{room.room}) {msg.message}" for msg in messages)
+            self.session.query(Message).filter_by(room_id=room.id).delete()
+            self.session.commit()
+            
+            return f"/msgs\n{message_texts}"
+        
         return "/msgs none"
 
     def handle_pmsg(self, args, username, conn):
         if len(args.split(' ', 1)) < 2:
             return "/pmsg usage"
+       
         recipient, private_msg = args.split(' ', 1)
-        if recipient not in self.clients:
+       
+        if not self.session.query(User).filter_by(username=recipient).first():
             return "/pmsg no_user"
-        message = f"({username} @private) {private_msg}"
-        with self.lock:
-            self.private_messages[recipient].append(message)
-        self.clients[recipient].sendall((message + '\n').encode())
+       
+        private_message = PrivateMessage(to_user=recipient, from_user=username, message=private_msg)
+        self.session.add(private_message)
+        self.session.commit()
+        
+        if recipient in self.clients:
+            self.clients[recipient].sendall((f"({username} @private) {private_msg}" + '\n').encode())
+        
         return "/pmsg sent"
 
     def handle_pmsgs(self, args, username, conn):
-        with self.lock:
-            if not self.private_messages[username]:
-                return "/pmsgs none"
-            messages = "\n".join(self.private_messages[username])
-            self.private_messages[username].clear()
-        return f"/pmsgs\n{messages}"
+        private_messages = self.session.query(PrivateMessage).filter_by(to_user=username).all()
+        
+        if not private_messages:
+            return "/pmsgs none"
+       
+        message_texts = "\n".join(f"({pm.from_user} @private) {pm.message}" for pm in private_messages)
+        self.session.query(PrivateMessage).filter_by(to_user=username).delete()
+        self.session.commit()
+        
+        return f"/pmsgs\n{message_texts}"
 
     def handle_help(self, args, username, conn):
         return ("/help: Show this help message\n"
@@ -179,11 +234,15 @@ class Server:
                 "/pmsg <username> <message>: Sends a private message\n"
                 "/pmsgs: Retrieves private messages from the queue\n")
 
-    def get_user_room(self, username):
-        for room, users in self.rooms.items():
-            if username in users:
-                return room
-        return None
+    def get_user_room(self, user):
+        return self.session.query(Room).join(user_room_table).filter(user_room_table.c.user_id == user.id).first()
+
+    def remove_user_from_rooms(self, username):
+        user = self.session.query(User).filter_by(username=username).first()
+        if user:
+            for room in user.rooms:
+                room.users.remove(user)
+            self.session.commit()
 
 if __name__ == "__main__":
     server = Server()
